@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { StyleSheet, View, Image, FlatList, ScrollView, TouchableOpacity, Linking, ImageBackground, Modal, Alert } from 'react-native';
 import {
   Text, Searchbar, Card, Button, Portal, Dialog, ActivityIndicator,
@@ -33,6 +33,14 @@ const DISPLAY_SIZE_FILTERS = ["S", "M", "L", "XL"];
 
 const stockCache: Record<string, ProductDetails> = {};
 
+const formatPrice = (priceVal: any) => {
+  if (priceVal === undefined || priceVal === null) return "N/A";
+  const str = priceVal.toString();
+  const num = parseInt(str.replace(/[^\d]/g, ''), 10);
+  if (isNaN(num)) return "N/A";
+  return `$${num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".")}`;
+};
+
 export default function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
@@ -42,6 +50,7 @@ export default function App() {
   const [page, setPage] = useState(1);
   const [cat, setCat] = useState("");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedBrand, setSelectedBrand] = useState("VER TODOS");
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
   const [showFilters, setShowFilters] = useState(false);
@@ -60,6 +69,16 @@ export default function App() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [pickingSize, setPickingSize] = useState<string | null>(null);
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
+
+  const currentSearchRef = useRef("");
+  const currentCatRef = useRef("");
+  const currentBrandRef = useRef("");
+
+  useEffect(() => {
+    currentSearchRef.current = debouncedSearch;
+    currentCatRef.current = cat;
+    currentBrandRef.current = selectedBrand;
+  }, [debouncedSearch, cat, selectedBrand]);
 
   const initDB = useCallback(() => {
     db.execSync(`
@@ -117,45 +136,120 @@ export default function App() {
   useEffect(() => { initDB(); }, [initDB]);
 
   const fetchCatalog = async (pNum: number, isMore = false) => {
+    const activeSearch = debouncedSearch;
+    const activeCat = cat;
+    const activeBrand = selectedBrand;
+
     if (!isMore) { setLoading(true); setProducts([]); setHasMore(true); } else setLoadingMore(true);
     setScanning(0.1);
     try {
-      const { data } = await axios.get(`https://overflycl.com/page/${pNum}/?s=${search}&product_cat=${cat}&post_type=product`, { timeout: 10000 });
-      const $ = cheerio.load(data);
+      let url = `https://overflycl.com/wp-json/wc/store/v1/products?page=${pNum}&per_page=12`;
+      if (activeSearch) {
+        url += `&search=${encodeURIComponent(activeSearch)}`;
+      }
+      if (activeCat) {
+        url += `&category=${encodeURIComponent(activeCat)}`;
+      }
+
+      const { data } = await axios.get(url, { timeout: 10000 });
+
+      if (activeSearch !== currentSearchRef.current || activeCat !== currentCatRef.current || activeBrand !== currentBrandRef.current) {
+        return;
+      }
+
+      if (!Array.isArray(data) || data.length === 0) {
+        setHasMore(false);
+        if (!isMore) setProducts([]);
+        return;
+      }
+
+      if (data.length < 12) {
+        setHasMore(false);
+      }
+
       let items: Product[] = [];
-      $('.product-grid-item').each((index, element) => {
-        const titleTag = $(element).find('.wd-entities-title a');
-        if (titleTag.length) {
-          const name = titleTag.text().trim();
-          const brand = BRANDS.find(b => name.toLowerCase().includes(b.toLowerCase())) || "MAULE";
-          const link = titleTag.attr('href') || "";
-          const imgTag = $(element).find('.product-image-link img');
-          let img = imgTag.attr('data-wood-src') || imgTag.attr('data-src') || imgTag.attr('src') || "";
-          if (selectedBrand === "VER TODOS" || brand.toLowerCase() === selectedBrand.toLowerCase()) {
-            items.push({ id: `${pNum}-${index}-${link}`, name, link, img, brand, details: stockCache[link] || { price: "...", stock: [], loaded: false } });
-          }
+      data.forEach((item: any, index: number) => {
+        const name = item.name;
+        const brand = item.brands?.[0]?.name || BRANDS.find(b => name.toLowerCase().includes(b.toLowerCase())) || "MAULE";
+        const link = item.permalink;
+        const img = item.images?.[0]?.src || "";
+        const formattedPrice = formatPrice(item.prices?.price || "0");
+
+        let details: ProductDetails;
+        if (stockCache[link]) {
+          details = stockCache[link];
+        } else if (item.type !== "variable") {
+          details = {
+            price: formattedPrice,
+            stock: [{ talla: "ÚNICA", cant: item.is_in_stock ? 1 : 0 }],
+            loaded: true
+          };
+          stockCache[link] = details;
+        } else {
+          details = {
+            price: formattedPrice,
+            stock: [],
+            loaded: false
+          };
+        }
+
+        if (activeBrand === "VER TODOS" || brand.toLowerCase() === activeBrand.toLowerCase()) {
+          items.push({ id: `${item.id}-${pNum}-${index}`, name, link, img, brand, details });
         }
       });
-      if (isMore) setProducts(prev => [...prev, ...items]); else setProducts(items);
+
+      if (isMore) {
+        setProducts(prev => {
+          const existingLinks = new Set(prev.map(p => p.link));
+          const uniqueNewItems = items.filter(i => !existingLinks.has(i.link));
+          return [...prev, ...uniqueNewItems];
+        });
+      } else {
+        setProducts(items);
+      }
       setScanning(0.3);
+
       const itemsToLoad = items.filter(i => !i.details.loaded);
       let loadedCount = 0;
-      await Promise.all(itemsToLoad.map(async (item) => {
-        try {
-          const resDetail = await axios.get(item.link, { timeout: 8000 });
-          const $$ = cheerio.load(resDetail.data);
-          const p = $$('.price').first().text().trim() || "N/A";
-          const vData = $$('.variations_form').attr('data-product_variations');
-          let s: StockItem[] = vData ? JSON.parse(vData).map((v: any) => ({ talla: v.attributes.attribute_pa_talla ? v.attributes.attribute_pa_talla.toUpperCase() : "ÚNICA", cant: v.max_qty || 0 })) : [{ talla: "ÚNICA", cant: 1 }];
-          const f = { price: p, stock: s, loaded: true };
-          stockCache[item.link] = f;
-          setProducts(prev => prev.map(p => p.link === item.link ? { ...p, details: f } : p));
-        } catch (e) { } finally { loadedCount++; setScanning(0.3 + (loadedCount / itemsToLoad.length) * 0.7); }
-      }));
+      if (itemsToLoad.length > 0) {
+        await Promise.all(itemsToLoad.map(async (item) => {
+          try {
+            const resDetail = await axios.get(item.link, { timeout: 8000 });
+
+            if (activeSearch !== currentSearchRef.current || activeCat !== currentCatRef.current || activeBrand !== currentBrandRef.current) {
+              return;
+            }
+
+            const $$ = cheerio.load(resDetail.data);
+            const p = $$('.price').first().text().trim() || item.details.price;
+            const vData = $$('.variations_form').attr('data-product_variations');
+            let s: StockItem[] = vData ? JSON.parse(vData).map((v: any) => ({ talla: v.attributes.attribute_pa_talla ? v.attributes.attribute_pa_talla.toUpperCase() : "ÚNICA", cant: v.max_qty || 0 })) : [{ talla: "ÚNICA", cant: 1 }];
+            const f = { price: p, stock: s, loaded: true };
+            stockCache[item.link] = f;
+            setProducts(prev => prev.map(p => p.link === item.link ? { ...p, details: f } : p));
+          } catch (e) { } finally { loadedCount++; setScanning(0.3 + (loadedCount / itemsToLoad.length) * 0.7); }
+        }));
+      }
     } catch (err) { setHasMore(false); } finally { setLoading(false); setLoadingMore(false); setScanning(0); }
   };
 
-  useEffect(() => { setPage(1); fetchCatalog(1, false); }, [cat, selectedBrand]);
+  useEffect(() => {
+    if (search.length === 0) {
+      setDebouncedSearch("");
+    } else if (search.length < 3) {
+      setDebouncedSearch("");
+    } else {
+      const timer = setTimeout(() => {
+        setDebouncedSearch(search);
+      }, 400);
+      return () => clearTimeout(timer);
+    }
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1);
+    fetchCatalog(1, false);
+  }, [cat, selectedBrand, debouncedSearch]);
   const loadMore = () => { if (!loading && !loadingMore && !scanning && hasMore) { const nextP = page + 1; setPage(nextP); fetchCatalog(nextP, true); } };
 
   const filteredData = products.filter(p => !selectedSize || (p.details.loaded && p.details.stock.some(s => s.talla.toUpperCase() === selectedSize && s.cant > 0)));
@@ -190,7 +284,7 @@ export default function App() {
               placeholder="Buscar..."
               onChangeText={setSearch}
               value={search}
-              onSubmitEditing={() => fetchCatalog(1, false)}
+              onSubmitEditing={() => setDebouncedSearch(search)}
               style={styles.search}
               iconColor="#f9d423"
             />
@@ -211,7 +305,7 @@ export default function App() {
           {showFilters && (
             <View style={styles.accordionBody}>
               <View style={{ height: 35, marginBottom: 8 }}><ScrollView horizontal>{Object.keys(CATEGORIES).map(k => (<TouchableOpacity key={k} onPress={() => setCat(cat === CATEGORIES[k] ? "" : CATEGORIES[k])} style={[styles.chip, { backgroundColor: cat === CATEGORIES[k] ? '#f9d423' : '#222' }]}><Text style={{ color: cat === CATEGORIES[k] ? '#000' : '#fff', fontWeight: 'bold', fontSize: 11 }}>{k}</Text></TouchableOpacity>))}</ScrollView></View>
-              <View style={{ height: 35, marginBottom: 8 }}><ScrollView horizontal>{["VER TODOS", ...BRANDS].map(b => (<TouchableOpacity key={b} onPress={() => setSelectedBrand(selectedBrand === b ? "VER TODOS" : b)} style={[styles.chip, { backgroundColor: (selectedBrand === b && b !== "VER TODOS") || (b === "VER TODOS" && selectedBrand === "VER TODOS") ? '#fff' : '#111', borderWeight: 1, borderColor: '#333' }]}><Text style={{ color: (selectedBrand === b && b !== "VER TODOS") || (b === "VER TODOS" && selectedBrand === "VER TODOS") ? '#000' : '#888', fontWeight: 'bold', fontSize: 10 }}>{b}</Text></TouchableOpacity>))}</ScrollView></View>
+              <View style={{ height: 35, marginBottom: 8 }}><ScrollView horizontal>{["VER TODOS", ...BRANDS].map(b => (<TouchableOpacity key={b} onPress={() => setSelectedBrand(selectedBrand === b ? "VER TODOS" : b)} style={[styles.chip, { backgroundColor: (selectedBrand === b && b !== "VER TODOS") || (b === "VER TODOS" && selectedBrand === "VER TODOS") ? '#fff' : '#111', borderWidth: 1, borderColor: '#333' }]}><Text style={{ color: (selectedBrand === b && b !== "VER TODOS") || (b === "VER TODOS" && selectedBrand === "VER TODOS") ? '#000' : '#888', fontWeight: 'bold', fontSize: 10 }}>{b}</Text></TouchableOpacity>))}</ScrollView></View>
               <View style={{ height: 35 }}><ScrollView horizontal><View style={{ width: 80, justifyContent: 'center' }}><Text style={{ color: '#888', fontSize: 10, fontWeight: 'bold' }}>TALLA:</Text></View>{DISPLAY_SIZE_FILTERS.map(s => (<TouchableOpacity key={s} onPress={() => setSelectedSize(selectedSize === s ? null : s)} style={[styles.sizeChip, { backgroundColor: selectedSize === s ? '#f9d423' : '#333' }]}><Text style={{ color: selectedSize === s ? '#000' : '#fff', fontWeight: 'bold' }}>{s}</Text></TouchableOpacity>))}</ScrollView></View>
             </View>
           )}
@@ -223,14 +317,48 @@ export default function App() {
               renderItem={({ item }) => {
                 const sL = item.details.stock.some(s => ["S", "M", "L", "XL"].includes(s.talla.toUpperCase()));
                 const sN = item.details.stock.some(s => !isNaN(parseInt(s.talla)));
+                const hasStock = item.details.loaded && item.details.stock.some(s => s.cant > 0);
                 return (
                   <Card style={styles.card}>
                     <TouchableOpacity onPress={() => { setSelectedImg(item.img); setImgModal(true); }}><Card.Cover source={{ uri: item.img || 'https://via.placeholder.com/150' }} style={styles.cardImg} /></TouchableOpacity>
                     <Card.Content style={styles.cardContent}>
                       <Badge style={styles.badge}>{item.brand}</Badge>
                       <Text variant="titleSmall" style={styles.title} numberOfLines={2}>{item.name}</Text>
-                      <View style={styles.cardSizeRow}>{sL ? (["S", "M", "L", "XL"].map(sz => { const st = item.details.stock.find(s => s.talla.toUpperCase() === sz); const hs = st && st.cant > 0; return (<View key={sz} style={styles.cardSizeItem}><Text style={[styles.cardSizeText, !hs && styles.cardSizeTextEmpty]}>{sz}</Text>{!hs && <View style={styles.redXOverlay}><Text style={{ color: 'red', fontSize: 8, fontWeight: '900' }}>X</Text></View>}</View>); })) : sN ? (item.details.stock.slice(0, 4).map((s, idx) => (<View key={idx} style={styles.cardSizeItem}><Text style={styles.cardSizeText}>{s.talla}</Text>{s.cant === 0 && <View style={styles.redXOverlay}><Text style={{ color: 'red', fontSize: 8, fontWeight: '900' }}>X</Text></View>}</View>))) : null}</View>
-                      <View style={styles.cardFooter}><Text variant="headlineSmall" style={styles.price}>{item.details.price}</Text><IconButton icon="cart-plus" size={18} iconColor="#f9d423" onPress={() => { setSelectedProduct(item); setVisible(true); }} /></View>
+                      <View style={styles.cardSizeRow}>
+                        {item.details.loaded ? (
+                          !hasStock ? (
+                            <Text style={{ color: '#ff4444', fontWeight: 'bold', fontSize: 9, letterSpacing: 0.5 }}>SIN STOCK DISPONIBLE</Text>
+                          ) : sL ? (
+                            ["S", "M", "L", "XL"].map(sz => {
+                              const st = item.details.stock.find(s => s.talla.toUpperCase() === sz);
+                              const hs = st && st.cant > 0;
+                              return (
+                                <View key={sz} style={styles.cardSizeItem}>
+                                  <Text style={[styles.cardSizeText, !hs && styles.cardSizeTextEmpty]}>{sz}</Text>
+                                  {!hs && <View style={styles.redXOverlay}><Text style={{ color: 'red', fontSize: 8, fontWeight: '900' }}>X</Text></View>}
+                                </View>
+                              );
+                            })
+                          ) : sN ? (
+                            item.details.stock.slice(0, 4).map((s, idx) => (
+                              <View key={idx} style={styles.cardSizeItem}>
+                                <Text style={styles.cardSizeText}>{s.talla}</Text>
+                                {s.cant === 0 && <View style={styles.redXOverlay}><Text style={{ color: 'red', fontSize: 8, fontWeight: '900' }}>X</Text></View>}
+                              </View>
+                            ))
+                          ) : null
+                        ) : null}
+                      </View>
+                      <View style={styles.cardFooter}>
+                        <Text variant="headlineSmall" style={styles.price}>{item.details.price}</Text>
+                        <IconButton
+                          icon="cart-plus"
+                          size={18}
+                          iconColor="#f9d423"
+                          disabled={item.details.loaded && !hasStock}
+                          onPress={() => { setSelectedProduct(item); setVisible(true); }}
+                        />
+                      </View>
                     </Card.Content>
                   </Card>
                 );
