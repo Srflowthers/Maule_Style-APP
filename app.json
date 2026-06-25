@@ -1,0 +1,34 @@
+{
+  "expo": {
+    "name": "Maule Style",
+    "slug": "maule-style",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./app_icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./app_icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./app_icon.png",
+        "backgroundColor": "#000000"
+      },
+      "package": "com.maulestyle.app"
+    },
+    "web": {
+      "favicon": "./app_icon.png"
+    },
+    "plugins": [
+      "expo-sqlite"
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "MauleStyle",
+  "version": "1.0.0",
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-native": "^0.73.0",
+    "axios": "^1.15.2",
+    "expo": "^55.0.17",
+    "expo-sqlite": "~55.0.15",
+    "expo-status-bar": "~55.0.5",
+    "expo-system-ui": "^55.0.16",
+    "react": "19.2.0",
+    "react-native": "0.83.6",
+    "react-native-cheerio": "^1.0.0-rc.4",
+    "react-native-paper": "^5.15.1",
+    "react-native-vector-icons": "^10.0.3",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.20.0"
+  },
+  "private": true
+}
